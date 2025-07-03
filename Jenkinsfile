@@ -8,44 +8,58 @@ pipeline {
     parameters {
         choice(name: 'DEPLOY_ENV',
                choices: ['blue', 'green'],
-               description: 'Choose which environment to deploy: Blue or Green')
+               description: 'Which environment to deploy')
         choice(name: 'DOCKER_TAG',
                choices: ['blue', 'green'],
-               description: 'Choose the Docker image tag for the deployment')
+               description: 'Docker image tag')
         booleanParam(name: 'SWITCH_TRAFFIC',
                      defaultValue: false,
                      description: 'Switch traffic between Blue and Green')
     }
 
     environment {
-        IMAGE_NAME    = 'aniket1805/bankapp'
-        TAG           = "${params.DOCKER_TAG}"
+        IMAGE_NAME     = 'aniket1805/bankapp'
+        TAG            = "${params.DOCKER_TAG}"
         KUBE_NAMESPACE = 'webapps'
-        SCANNER_HOME  = tool 'sonar-scanner'
+        SCANNER_HOME   = tool 'sonar-scanner'
     }
 
     stages {
 
-        stage('Git Checkout') {
-            steps { checkout scm }
+        stage('Git Checkout') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/anikethulule2000/blue_green_deployment.git'
+            }
         }
 
-        stage('Compile')        { steps { sh 'mvn -B compile' } }
-        stage('Test')           { steps { sh 'mvn -B test -DskipTests=true' } }
-        stage('Trivy FS Scan')  { steps { sh 'trivy fs --format table -o fs.html .' } }
+        stage('Compile') {
+            steps {
+                sh 'mvn compile'
+            }
+        }
 
-        stage('Sonarqube Analysis') {
+        stage('Test') {
+            steps {
+                sh 'mvn test -DskipTests=true'
+            }
+        }
+
+        stage('Trivy FS Scan') {
+            steps {
+                sh 'trivy fs --format table -o fs.html .'
+            }
+        }
+
+        stage('SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('sonar') {
-                    sh "${SCANNER_HOME}/bin/sonar-scanner " +
-                       "-Dsonar.projectKey=multitier " +
-                       "-Dsonar.projectName=multitier " +
-                       "-Dsonar.java.binaries=target"
+                      sh "$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectKey=multitier -Dsonar.projectName=multitier -Dsonar.java.binaries=target"
                 }
             }
         }
 
-        stage('Quality Gate Check') {
+        stage('Quality Gate Check') {
             steps {
                 timeout(time: 1, unit: 'HOURS') {
                     waitForQualityGate abortPipeline: false
@@ -53,104 +67,119 @@ pipeline {
             }
         }
 
-        stage('Build') {
-            steps { sh 'mvn -B package -DskipTests=true' }
+        stage('Build Jar') {
+            steps {
+                sh 'mvn package -DskipTests=true'
+            }
         }
 
-        stage('Publish Artifact to Nexus') {
+        stage('Publish Artifact to Nexus') {
             steps {
                 withMaven(globalMavenSettingsConfig: 'maven-settings',
-                          maven: 'maven3',
-                          traceability: true) {
-                    sh 'mvn -B deploy -DskipTests=true'
+                          maven: 'maven3', traceability: true) {
+                    sh 'mvn deploy -DskipTests=true'
                 }
             }
         }
 
-        stage('Docker build') {
+        stage('Docker Build') {
             steps {
-                withDockerRegistry(credentialsId: 'docker-cred') {
-                    sh "docker build -t ${IMAGE_NAME}:${TAG} ."
+                script {
+                    withDockerRegistry(credentialsId: 'docker-cred') {
+                        sh "docker build -t ${IMAGE_NAME}:${TAG} ."
+                    }
                 }
             }
         }
 
-        stage('Trivy Image Scan') {
-            steps { sh "trivy image --format table -o image.html ${IMAGE_NAME}:${TAG}" }
+        stage('Trivy Image Scan') {
+            steps {
+                sh "trivy image --format table -o image.html ${IMAGE_NAME}:${TAG}"
+            }
         }
 
-        stage('Docker Push Image') {
+        stage('Docker Push') {
             steps {
-                withDockerRegistry(credentialsId: 'docker-cred') {
-                    sh "docker push ${IMAGE_NAME}:${TAG}"
+                script {
+                    withDockerRegistry(credentialsId: 'docker-cred') {
+                        sh "docker push ${IMAGE_NAME}:${TAG}"
+                    }
                 }
             }
         }
 
-        /* ---------------- Kubernetes deployment & blue‑green logic ---------------- */
-
-        stage('Deploy MySQL') {
+        stage('Deploy MySQL') {
             steps {
-                withKubeConfig(credentialsId: 'k8-token',
-                               clusterName: 'anikettestproject-cluster',
-                               namespace: KUBE_NAMESPACE) {
-                    sh "kubectl apply -f mysql-ds.yml -n ${KUBE_NAMESPACE}"
+                script {
+                    withKubeConfig(credentialsId: 'k8-token',
+                                   clusterName: 'anikettestproject-cluster',
+                                   namespace: KUBE_NAMESPACE) {
+                        sh "kubectl apply -f mysql-ds.yml -n ${KUBE_NAMESPACE}"
+                    }
                 }
             }
         }
 
-        stage('Deploy Service') {
+        stage('Deploy Service') {
             steps {
-                withKubeConfig(credentialsId: 'k8-token',
-                               clusterName: 'anikettestproject-cluster',
-                               namespace: KUBE_NAMESPACE) {
-                    sh """
-                       if ! kubectl get svc bankapp-service -n ${KUBE_NAMESPACE}; then
-                           kubectl apply -f bankapp-service.yml -n ${KUBE_NAMESPACE}
-                       fi
-                       """
+                script {
+                    withKubeConfig(credentialsId: 'k8-token',
+                                   clusterName: 'anikettestproject-cluster',
+                                   namespace: KUBE_NAMESPACE) {
+                        sh '''
+                            if ! kubectl get svc bankapp-service -n ${KUBE_NAMESPACE}; then
+                                kubectl apply -f bankapp-service.yml -n ${KUBE_NAMESPACE}
+                            fi
+                        '''
+                    }
                 }
             }
         }
 
-        stage('Deploy App') {
+        stage('Deploy App') {
             steps {
-                withKubeConfig(credentialsId: 'k8-token',
-                               clusterName: 'anikettestproject-cluster',
-                               namespace: KUBE_NAMESPACE) {
-                    def deploymentFile = (params.DEPLOY_ENV == 'blue')
+                script {
+                    def deploymentFile = params.DEPLOY_ENV == 'blue'
                                          ? 'app-deployment-blue.yml'
                                          : 'app-deployment-green.yml'
-                    sh "kubectl apply -f ${deploymentFile} -n ${KUBE_NAMESPACE}"
+                    withKubeConfig(credentialsId: 'k8-token',
+                                   clusterName: 'anikettestproject-cluster',
+                                   namespace: KUBE_NAMESPACE) {
+                        sh "kubectl apply -f ${deploymentFile} -n ${KUBE_NAMESPACE}"
+                    }
                 }
             }
         }
 
-        stage('Switch Traffic') {
+        stage('Switch Traffic') {
             when { expression { params.SWITCH_TRAFFIC } }
             steps {
-                withKubeConfig(credentialsId: 'k8-token',
-                               clusterName: 'anikettestproject-cluster',
-                               namespace: KUBE_NAMESPACE) {
-                    sh """
-                       kubectl patch service bankapp-service \
-                         -p '{\"spec\":{\"selector\":{\"app\":\"bankapp\",\"version\":\"${params.DEPLOY_ENV}\"}}}' \
-                         -n ${KUBE_NAMESPACE}
-                       """
+                script {
+                    withKubeConfig(credentialsId: 'k8-token',
+                                   clusterName: 'anikettestproject-cluster',
+                                   namespace: KUBE_NAMESPACE) {
+                        sh """
+                            kubectl patch service bankapp-service \
+                              -p '{ "spec": { "selector": { "app": "bankapp", "version": "${params.DEPLOY_ENV}" }}}' \
+                              -n ${KUBE_NAMESPACE}
+                        """
+                    }
+                    echo "Traffic switched to the ${params.DEPLOY_ENV} environment."
                 }
-                echo "Traffic switched to the ${params.DEPLOY_ENV} environment."
             }
         }
 
-        stage('Verify') {
+        stage('Verify Deployment') {
             steps {
-                withKubeConfig(credentialsId: 'k8-token',
-                               clusterName: 'anikettestproject-cluster',
-                               namespace: KUBE_NAMESPACE) {
-                    sh """
-                       kubectl get pods -l version=${params.DEPLOY_ENV} -n ${KUBE_NAMESPACE}
-                       kubectl get svc bankapp-service -n ${KUBE_NAMESPACE}
-                       """
+                script {
+                    withKubeConfig(credentialsId: 'k8-token',
+                                   clusterName: 'anikettestproject-cluster',
+                                   namespace: KUBE_NAMESPACE) {
+                        sh """
+                            kubectl get pods -l version=${params.DEPLOY_ENV} -n ${KUBE_NAMESPACE}
+                            kubectl get svc bankapp-service -n ${KUBE_NAMESPACE}
+                        """
+                    }
                 }
             }
         }
