@@ -28,8 +28,7 @@ pipeline {
 
         stage('Git Checkout') {
             steps {
-                git branch: 'main',
-                    url: 'https://github.com/anikethulule2000/blue_green_deployment.git'
+                checkout scm
             }
         }
 
@@ -111,10 +110,8 @@ pipeline {
         stage('Deploy MySQL') {
             steps {
                 script {
-                    withKubeConfig(credentialsId: 'k8-token',
-                                   clusterName: 'anikettestproject-cluster',
-                                   namespace: KUBE_NAMESPACE) {
-                        sh "kubectl apply -f mysql-ds.yml -n ${KUBE_NAMESPACE}"
+                    withKubeConfig(caCertificate: '', clusterName: 'anikettestproject-cluster', contextName: '', credentialsId: 'k8-token', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://04B156B8E9377A835EC7902A0923ACF5.gr7.us-east-1.eks.amazonaws.com') {
+                        sh "kubectl apply -f mysql-ds.yml -n ${KUBE_NAMESPACE}"  
                     }
                 }
             }
@@ -123,15 +120,12 @@ pipeline {
         stage('Deploy Service') {
             steps {
                 script {
-                    withKubeConfig(credentialsId: 'k8-token',
-                                   clusterName: 'anikettestproject-cluster',
-                                   namespace: KUBE_NAMESPACE) {
-                        sh '''
-                            if ! kubectl get svc bankapp-service -n ${KUBE_NAMESPACE}; then
+                    withKubeConfig(caCertificate: '', clusterName: 'anikettestproject-cluster', contextName: '', credentialsId: 'k8-token', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://04B156B8E9377A835EC7902A0923ACF5.gr7.us-east-1.eks.amazonaws.com') {
+                        sh """ if ! kubectl get svc bankapp-service -n ${KUBE_NAMESPACE}; then
                                 kubectl apply -f bankapp-service.yml -n ${KUBE_NAMESPACE}
-                            fi
-                        '''
-                    }
+                              fi
+                        """
+                   }
                 }
             }
         }
@@ -139,12 +133,13 @@ pipeline {
         stage('Deploy App') {
             steps {
                 script {
-                    def deploymentFile = params.DEPLOY_ENV == 'blue'
-                                         ? 'app-deployment-blue.yml'
-                                         : 'app-deployment-green.yml'
-                    withKubeConfig(credentialsId: 'k8-token',
-                                   clusterName: 'anikettestproject-cluster',
-                                   namespace: KUBE_NAMESPACE) {
+                    def deploymentFile = ""
+                    if (params.DEPLOY_ENV == 'blue') {
+                        deploymentFile = 'app-deployment-blue.yml'
+                    } else {
+                        deploymentFile = 'app-deployment-green.yml'
+                    }
+                    withKubeConfig(caCertificate: '', clusterName: 'anikettestproject-cluster', contextName: '', credentialsId: 'k8-token', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://04B156B8E9377A835EC7902A0923ACF5.gr7.us-east-1.eks.amazonaws.com') {
                         sh "kubectl apply -f ${deploymentFile} -n ${KUBE_NAMESPACE}"
                     }
                 }
@@ -155,16 +150,14 @@ pipeline {
             when { expression { params.SWITCH_TRAFFIC } }
             steps {
                 script {
-                    withKubeConfig(credentialsId: 'k8-token',
-                                   clusterName: 'anikettestproject-cluster',
-                                   namespace: KUBE_NAMESPACE) {
-                        sh """
-                            kubectl patch service bankapp-service \
-                              -p '{ "spec": { "selector": { "app": "bankapp", "version": "${params.DEPLOY_ENV}" }}}' \
-                              -n ${KUBE_NAMESPACE}
-                        """
+                    def newEnv = params.DEPLOY_ENV
+                    // Always switch traffic based on DEPLOY_ENV
+                    withKubeConfig(caCertificate: '', clusterName: 'anikettestproject-cluster', contextName: '', credentialsId: 'k8-token', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://04B156B8E9377A835EC7902A0923ACF5.gr7.us-east-1.eks.amazonaws.com') {
+                        sh '''
+                            kubectl patch service bankapp-service -p "{\\"spec\\": {\\"selector\\": {\\"app\\": \\"bankapp\\", \\"version\\": \\"''' + newEnv + '''\\"}}}" -n ${KUBE_NAMESPACE}
+                        '''
                     }
-                    echo "Traffic switched to the ${params.DEPLOY_ENV} environment."
+                    echo "Traffic has been switched to the ${newEnv} environment."
                 }
             }
         }
@@ -172,12 +165,11 @@ pipeline {
         stage('Verify Deployment') {
             steps {
                 script {
-                    withKubeConfig(credentialsId: 'k8-token',
-                                   clusterName: 'anikettestproject-cluster',
-                                   namespace: KUBE_NAMESPACE) {
+                    def verifyEnv = params.DEPLOY_ENV
+                    withKubeConfig(caCertificate: '', clusterName: 'anikettestproject-cluster', contextName: '', credentialsId: 'k8-token', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://04B156B8E9377A835EC7902A0923ACF5.gr7.us-east-1.eks.amazonaws.com') {
                         sh """
-                            kubectl get pods -l version=${params.DEPLOY_ENV} -n ${KUBE_NAMESPACE}
-                            kubectl get svc bankapp-service -n ${KUBE_NAMESPACE}
+                        kubectl get pods -l version=${verifyEnv} -n ${KUBE_NAMESPACE}
+                        kubectl get svc bankapp-service -n ${KUBE_NAMESPACE}
                         """
                     }
                 }
